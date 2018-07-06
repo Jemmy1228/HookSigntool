@@ -1,0 +1,8 @@
+.vs/
+.vscode/
+
+Debug/
+Release/
+
+HookSigntool/Debug/
+HookSigntool/Release/
