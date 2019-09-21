@@ -2,127 +2,175 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <Windows.h>
-#include <wincrypt.h>
-#include <stdlib.h>
+#include <wchar.h>
 #include <detours.h>
-#include <direct.h>
-#include <io.h>
-#include<stdio.h>
+#include "mssign32.h"
 
+HMODULE hModCrypt32 = NULL, hModMssign32 = NULL, hModKernel32 = NULL;
 using fntCertVerifyTimeValidity = decltype(CertVerifyTimeValidity);
+using fntSignerSign = decltype(SignerSign);
+using fntSignerTimeStamp = decltype(SignerTimeStamp);
 using fntGetLocalTime = decltype(GetLocalTime);
+fntCertVerifyTimeValidity* pOldCertVerifyTimeValidity = NULL;
+fntSignerSign* pOldSignerSign = NULL;
+fntSignerTimeStamp* pOldSignerTimeStamp = NULL;
+fntGetLocalTime* pOldGetLocalTime = NULL;
 
-int year = -1;
-int month = -1;
-int day = -1;
-int dayofweek = -1;
-int hour = -1;
-int minute = -1;
-int second = -1;
-int milliseconds = -1;
+int year = -1, month = -1, day = -1, hour = -1, minute = -1, second = -1;
+WCHAR lpTimestamp[20];
 
-fntCertVerifyTimeValidity *pOldCertVerifyTimeValidity = NULL;
-fntGetLocalTime *pOldGetLocalTime = NULL;
-
+LPCWSTR ReplaceTimeStamp(LPCWSTR lpOriginalTS) {
+    if (!lpOriginalTS)
+        return NULL;
+    LPWSTR buf = new WCHAR[65];
+    memset(buf, 0, sizeof(WCHAR) * 65);
+    if (!_wcsicmp(lpOriginalTS, L"{CustomTimestampMarker-SHA1}")) {
+        wcscat(buf, L"http://timestamp.pki.jemmylovejenny.tk/SHA1/");
+        wcscat(buf, lpTimestamp);
+        return buf;
+    }
+    else if (!_wcsicmp(lpOriginalTS, L"{CustomTimestampMarker-SHA256}")) {
+        wcscat(buf, L"http://timestamp.pki.jemmylovejenny.tk/SHA256/");
+        wcscat(buf, lpTimestamp);
+        return buf;
+    }
+    else {
+        return lpOriginalTS;
+    }
+}
 LONG WINAPI NewCertVerifyTimeValidity(
-	LPFILETIME pTimeToVerify,
-	PCERT_INFO pCertInfo
+    LPFILETIME pTimeToVerify,
+    PCERT_INFO pCertInfo
 )
 {
-	return 0;
+    return 0;
 }
-
+HRESULT WINAPI NewSignerSign(
+    _In_     SIGNER_SUBJECT_INFO* pSubjectInfo,
+    _In_     SIGNER_CERT* pSignerCert,
+    _In_     SIGNER_SIGNATURE_INFO* pSignatureInfo,
+    _In_opt_ SIGNER_PROVIDER_INFO* pProviderInfo,
+    _In_opt_ LPCWSTR               pwszHttpTimeStamp,
+    _In_opt_ PCRYPT_ATTRIBUTES     psRequest,
+    _In_opt_ LPVOID                pSipData
+)
+{
+    return (*pOldSignerSign)(pSubjectInfo, pSignerCert, pSignatureInfo, pProviderInfo, ReplaceTimeStamp(pwszHttpTimeStamp), psRequest, pSipData);
+}
+HRESULT WINAPI NewSignerTimeStamp(
+    _In_     SIGNER_SUBJECT_INFO* pSubjectInfo,
+    _In_     LPCWSTR             pwszHttpTimeStamp,
+    _In_opt_ PCRYPT_ATTRIBUTES   psRequest,
+    _In_opt_ LPVOID              pSipData
+)
+{
+    return (*pOldSignerTimeStamp)(pSubjectInfo, ReplaceTimeStamp(pwszHttpTimeStamp), psRequest, pSipData);
+}
 void WINAPI NewGetLocalTime(
-	LPSYSTEMTIME lpSystemTime
+    LPSYSTEMTIME lpSystemTime
 )
 {
-	pOldGetLocalTime(lpSystemTime);
-	if (year >= 0)
-		lpSystemTime->wYear = year;
-	if (month >= 0)
-		lpSystemTime->wMonth = month;
-	if (day >= 0)
-		lpSystemTime->wDay = day;
-	if (dayofweek >= 0)
-		lpSystemTime->wDayOfWeek = dayofweek;
-	if (hour >= 0)
-		lpSystemTime->wHour = hour;
-	if (minute >= 0)
-		lpSystemTime->wMinute = minute;
-	if (second >= 0)
-		lpSystemTime->wSecond = second;
-	if (milliseconds >= 0)
-		lpSystemTime->wMilliseconds = milliseconds;
+    (*pOldGetLocalTime)(lpSystemTime);
+    if (year >= 0)
+        lpSystemTime->wYear = year;
+    if (month >= 0)
+        lpSystemTime->wMonth = month;
+    if (day >= 0)
+        lpSystemTime->wDay = day;
+    if (hour >= 0)
+        lpSystemTime->wHour = hour;
+    if (minute >= 0)
+        lpSystemTime->wMinute = minute;
+    if (second >= 0)
+        lpSystemTime->wSecond = second;
 }
 
-BOOL WINAPI DllMain(
-	_In_ HINSTANCE hinstDLL,
-	_In_ DWORD fdwReason,
-	_In_ LPVOID lpvReserved)
+bool HookFunctions()
 {
-	if (fdwReason == DLL_PROCESS_ATTACH)
-	{
-		//Get config file
-		char buf[260];
-		char* p = strstr(GetCommandLineA(), "-config ");
-		if (p) {
-			strcat_s(buf, p);
-		}
-		else {
-			_getcwd(buf, sizeof(buf));
-			strcat_s(buf, "\\hook.ini");
-		}
-		year = GetPrivateProfileInt("Time", "Year", -1, buf);
-		month = GetPrivateProfileInt("Time", "Month", -1, buf);
-		day = GetPrivateProfileInt("Time", "Day", -1, buf);
-		dayofweek = GetPrivateProfileInt("Time", "DayOfWeek", -1, buf);
-		hour = GetPrivateProfileInt("Time", "Hour", -1, buf);
-		minute = GetPrivateProfileInt("Time", "Minute", -1, buf);
-		second = GetPrivateProfileInt("Time", "Second", -1, buf);
-		milliseconds = GetPrivateProfileInt("Time", "Milliseconds", -1, buf);
+    if ((hModCrypt32 = LoadLibraryW(L"crypt32.dll")) == NULL
+        || (hModMssign32 = LoadLibraryW(L"mssign32.dll")) == NULL
+        || (hModKernel32 = LoadLibraryW(L"kernel32.dll")) == NULL)
+        return false;
 
-		memset(buf, 0, sizeof(buf));
-		strcpy_s(buf, getenv("APPDATA"));
-		strcat_s(buf, "\\TrustAsia\\DSignTool\\hook");
+    if ((pOldCertVerifyTimeValidity = (fntCertVerifyTimeValidity*)GetProcAddress(hModCrypt32, "CertVerifyTimeValidity")) == NULL
+        || (pOldSignerSign = (fntSignerSign*)GetProcAddress(hModMssign32, "SignerSign")) == NULL
+        || (pOldSignerTimeStamp = (fntSignerTimeStamp*)GetProcAddress(hModMssign32, "SignerTimeStamp")) == NULL
+        || (pOldGetLocalTime = (fntGetLocalTime*)GetProcAddress(hModKernel32, "GetLocalTime")) == NULL)
+        return false;
 
-		//Check is first run
-		if (_access(buf, 0)) {
-			if (MessageBoxA(NULL, "欢迎使用JemmyLoveJenny修改版的数字签名工具\r\n初次使用时建议您先阅读README了解修改版的变化\r\n是否打开README？", "欢迎使用", MB_YESNO) == IDYES) {
-				memset(buf, 0, sizeof(buf));
-				_getcwd(buf, sizeof(buf));
-				strcat_s(buf, "\\README.txt");
-				if (!_access(buf, 0)) {
-					char buf2[260];
-					strcpy_s(buf2, "notepad.exe \"");
-					strcat_s(buf2, buf);
-					strcat_s(buf2, "\"");
-					WinExec(buf2, 1);
-				}
-				else {
-					strcat_s(buf, " 不存在");
-					MessageBoxA(NULL, buf, "文件不存在", MB_OK | MB_ICONERROR);
-				}
-			}
-			memset(buf, 0, sizeof(buf));
-			strcpy_s(buf, getenv("APPDATA"));
-			strcat_s(buf, "\\TrustAsia\\DSignTool\\hook");
-			FILE *fp;
-			fp = fopen(buf, "w+");
-			fclose(fp);
-		}
+    if (DetourTransactionBegin() != NO_ERROR
+        || DetourAttach(&(PVOID&)pOldCertVerifyTimeValidity, NewCertVerifyTimeValidity) != NO_ERROR
+        || DetourAttach(&(PVOID&)pOldSignerSign, NewSignerSign) != NO_ERROR
+        || DetourAttach(&(PVOID&)pOldSignerTimeStamp, NewSignerTimeStamp) != NO_ERROR
+        || DetourAttach(&(PVOID&)pOldGetLocalTime, NewGetLocalTime) != NO_ERROR
+        || DetourTransactionCommit() != NO_ERROR)
+        return false;
+    return true;
+}
+bool ParseConfig(LPWSTR lpCommandLineConfig, LPWSTR lpCommandLineTimestamp)
+{
+    LPWSTR buf = new WCHAR[260];
+    memset(buf, 0, sizeof(WCHAR) * 260);
+    if (_wgetcwd(buf, 260) == NULL)
+        return false;
+    wcscat(buf, L"\\");
+    if (lpCommandLineConfig) {
+        if ((wcschr(lpCommandLineConfig, L':') - lpCommandLineConfig) == 1) {
+            memset(buf, 0, sizeof(WCHAR) * 260);
+            wsprintfW(buf, lpCommandLineConfig);
+        }
+        else {
+            wcscat(buf, lpCommandLineConfig);
+        }
+    }
+    else {
+        wcscat(buf, L"hook.ini");
+    }
 
-		pOldCertVerifyTimeValidity = (fntCertVerifyTimeValidity *)GetProcAddress(LoadLibraryW(L"crypt32.dll"), "CertVerifyTimeValidity");
-		pOldGetLocalTime = (fntGetLocalTime *)GetProcAddress(LoadLibraryW(L"kernel32.dll"), "GetLocalTime");
+    year = GetPrivateProfileIntW(L"Time", L"Year", -1, buf);
+    month = GetPrivateProfileIntW(L"Time", L"Month", -1, buf);
+    day = GetPrivateProfileIntW(L"Time", L"Day", -1, buf);
+    hour = GetPrivateProfileIntW(L"Time", L"Hour", -1, buf);
+    minute = GetPrivateProfileIntW(L"Time", L"Minute", -1, buf);
+    second = GetPrivateProfileIntW(L"Time", L"Second", -1, buf);
 
-		DetourTransactionBegin();
-		DetourAttach(&(PVOID&)pOldCertVerifyTimeValidity, NewCertVerifyTimeValidity);
-		DetourAttach(&(PVOID&)pOldGetLocalTime, NewGetLocalTime);
-		DetourTransactionCommit();
-	}
-	return 1;
+    if (lpCommandLineTimestamp)
+        wsprintfW(lpTimestamp, lpCommandLineTimestamp);
+    else
+        GetPrivateProfileStringW(L"Timestamp", L"Timestamp", NULL, lpTimestamp, 20, buf);
+    return true;
+}
+BOOL WINAPI DllMain(
+    _In_ HINSTANCE hinstDLL,
+    _In_ DWORD fdwReason,
+    _In_ LPVOID lpvReserved
+)
+{
+    if (fdwReason == DLL_PROCESS_ATTACH)
+    {
+        LPWSTR* szArglist = NULL;
+        int nArgs = 0;
+        szArglist = CommandLineToArgvW(GetCommandLineW(), &nArgs);
+
+        int iconfig = -1, its = -1;
+
+        for (int i = 0; i <= nArgs - 2; i++) {
+            if (!wcscmp(szArglist[i], L"-config"))
+                iconfig = i + 1;
+            if (!wcscmp(szArglist[i], L"-ts"))
+                its = i + 1;
+        }
+        if (!ParseConfig(iconfig >= 0 ? szArglist[iconfig] : NULL, its >= 0 ? szArglist[its] : NULL))
+            MessageBoxW(NULL, L"配置初始化失败，请检查hook.ini和命令行参数！", L"初始化失败", MB_ICONERROR);
+        LocalFree(szArglist);
+        if (!HookFunctions())
+            MessageBoxW(NULL, L"出现错误，无法Hook指定的函数\r\n请关闭程序重试！", L"Hook失败", MB_ICONERROR);
+        MessageBoxW(NULL, lpTimestamp, L"自定义时间戳为", MB_OK);
+    }
+    return 1;
 }
 
 extern "C" __declspec(dllexport) int attach()
 {
-	return 0;
+    return 0;
 }
