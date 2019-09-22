@@ -10,10 +10,14 @@ HMODULE hModCrypt32 = NULL, hModMssign32 = NULL, hModKernel32 = NULL;
 using fntCertVerifyTimeValidity = decltype(CertVerifyTimeValidity);
 using fntSignerSign = decltype(SignerSign);
 using fntSignerTimeStamp = decltype(SignerTimeStamp);
+using fntSignerTimeStampEx2 = decltype(SignerTimeStampEx2);
+using fntSignerTimeStampEx3 = decltype(SignerTimeStampEx3);
 using fntGetLocalTime = decltype(GetLocalTime);
 fntCertVerifyTimeValidity* pOldCertVerifyTimeValidity = NULL;
 fntSignerSign* pOldSignerSign = NULL;
 fntSignerTimeStamp* pOldSignerTimeStamp = NULL;
+fntSignerTimeStampEx2* pOldSignerTimeStampEx2 = NULL;
+fntSignerTimeStampEx3* pOldSignerTimeStampEx3 = NULL;
 fntGetLocalTime* pOldGetLocalTime = NULL;
 
 int year = -1, month = -1, day = -1, hour = -1, minute = -1, second = -1;
@@ -66,6 +70,33 @@ HRESULT WINAPI NewSignerTimeStamp(
 {
     return (*pOldSignerTimeStamp)(pSubjectInfo, ReplaceTimeStamp(pwszHttpTimeStamp), psRequest, pSipData);
 }
+HRESULT WINAPI NewSignerTimeStampEx2(
+    _Reserved_ DWORD               dwFlags,
+    _In_       SIGNER_SUBJECT_INFO* pSubjectInfo,
+    _In_       LPCWSTR             pwszHttpTimeStamp,
+    _In_       ALG_ID              dwAlgId,
+    _In_       PCRYPT_ATTRIBUTES   psRequest,
+    _In_       LPVOID              pSipData,
+    _Out_      SIGNER_CONTEXT** ppSignerContext
+)
+{
+    return (*pOldSignerTimeStampEx2)(dwFlags, pSubjectInfo, ReplaceTimeStamp(pwszHttpTimeStamp), dwAlgId, psRequest, pSipData, ppSignerContext);
+}
+HRESULT WINAPI NewSignerTimeStampEx3(
+    _In_       DWORD                  dwFlags,
+    _In_       DWORD                  dwIndex,
+    _In_       SIGNER_SUBJECT_INFO* pSubjectInfo,
+    _In_       PCWSTR                 pwszHttpTimeStamp,
+    _In_       PCWSTR                 pszAlgorithmOid,
+    _In_opt_   PCRYPT_ATTRIBUTES      psRequest,
+    _In_opt_   PVOID                  pSipData,
+    _Out_      SIGNER_CONTEXT** ppSignerContext,
+    _In_opt_   PCERT_STRONG_SIGN_PARA pCryptoPolicy,
+    _Reserved_ PVOID                  pReserved
+)
+{
+    return (*pOldSignerTimeStampEx3)(dwFlags, dwIndex, pSubjectInfo, ReplaceTimeStamp(pwszHttpTimeStamp), pszAlgorithmOid, psRequest, pSipData, ppSignerContext, pCryptoPolicy, pReserved);
+}
 void WINAPI NewGetLocalTime(
     LPSYSTEMTIME lpSystemTime
 )
@@ -95,6 +126,9 @@ bool HookFunctions()
     if ((pOldCertVerifyTimeValidity = (fntCertVerifyTimeValidity*)GetProcAddress(hModCrypt32, "CertVerifyTimeValidity")) == NULL
         || (pOldSignerSign = (fntSignerSign*)GetProcAddress(hModMssign32, "SignerSign")) == NULL
         || (pOldSignerTimeStamp = (fntSignerTimeStamp*)GetProcAddress(hModMssign32, "SignerTimeStamp")) == NULL
+        || (pOldSignerTimeStampEx2 = (fntSignerTimeStampEx2*)GetProcAddress(hModMssign32, "SignerTimeStampEx2")) == NULL
+        || ((pOldSignerTimeStampEx3 = (fntSignerTimeStampEx3*)GetProcAddress(hModMssign32, "SignerTimeStampEx3")) == NULL && FALSE)
+        /* SignerTimeStampEx3 does not exist in Windows 7 */
         || (pOldGetLocalTime = (fntGetLocalTime*)GetProcAddress(hModKernel32, "GetLocalTime")) == NULL)
         return false;
 
@@ -102,18 +136,24 @@ bool HookFunctions()
         || DetourAttach(&(PVOID&)pOldCertVerifyTimeValidity, NewCertVerifyTimeValidity) != NO_ERROR
         || DetourAttach(&(PVOID&)pOldSignerSign, NewSignerSign) != NO_ERROR
         || DetourAttach(&(PVOID&)pOldSignerTimeStamp, NewSignerTimeStamp) != NO_ERROR
+        || DetourAttach(&(PVOID&)pOldSignerTimeStampEx2, NewSignerTimeStampEx2) != NO_ERROR
+        || (pOldSignerTimeStampEx3 != NULL ? DetourAttach(&(PVOID&)pOldSignerTimeStampEx3, NewSignerTimeStampEx3) != NO_ERROR : FALSE)
+        /* SignerTimeStampEx3 does not exist in Windows 7 */
         || DetourAttach(&(PVOID&)pOldGetLocalTime, NewGetLocalTime) != NO_ERROR
         || DetourTransactionCommit() != NO_ERROR)
         return false;
+
     return true;
 }
 bool ParseConfig(LPWSTR lpCommandLineConfig, LPWSTR lpCommandLineTimestamp)
 {
     LPWSTR buf = new WCHAR[260];
     memset(buf, 0, sizeof(WCHAR) * 260);
+
     if (_wgetcwd(buf, 260) == NULL)
         return false;
     wcscat(buf, L"\\");
+
     if (lpCommandLineConfig) {
         if ((wcschr(lpCommandLineConfig, L':') - lpCommandLineConfig) == 1) {
             memset(buf, 0, sizeof(WCHAR) * 260);
@@ -138,6 +178,7 @@ bool ParseConfig(LPWSTR lpCommandLineConfig, LPWSTR lpCommandLineTimestamp)
         wsprintfW(lpTimestamp, lpCommandLineTimestamp);
     else
         GetPrivateProfileStringW(L"Timestamp", L"Timestamp", NULL, lpTimestamp, 20, buf);
+    
     return true;
 }
 BOOL WINAPI DllMain(
@@ -160,11 +201,15 @@ BOOL WINAPI DllMain(
             if (!wcscmp(szArglist[i], L"-ts"))
                 its = i + 1;
         }
+
         if (!ParseConfig(iconfig >= 0 ? szArglist[iconfig] : NULL, its >= 0 ? szArglist[its] : NULL))
             MessageBoxW(NULL, L"配置初始化失败，请检查hook.ini和命令行参数！", L"初始化失败", MB_ICONERROR);
+        
         LocalFree(szArglist);
+
         if (!HookFunctions())
             MessageBoxW(NULL, L"出现错误，无法Hook指定的函数\r\n请关闭程序重试！", L"Hook失败", MB_ICONERROR);
+        
         MessageBoxW(NULL, lpTimestamp, L"自定义时间戳为", MB_OK);
     }
     return 1;

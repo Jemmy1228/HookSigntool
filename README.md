@@ -6,11 +6,13 @@
 
 ## 原理
 编译出的`HookSigntool.dll`通过微软的Detours库Hook了签名工具的函数调用以达到目的
-总共Hook了4个函数：
+总共Hook了6个函数：
 1. [crypt32.dll!CertVerifyTimeValidity](https://docs.microsoft.com/en-us/windows/win32/api/wincrypt/nf-wincrypt-certverifytimevalidity) 返回值改为0，让签名工具误以为所有证书都在有效期内，以便在不修改系统时间的情况下用过期证书签名。
 2. [mssign32!SignerSign](https://docs.microsoft.com/en-us/windows/win32/seccrypto/signersign) 传入参数 pwszHttpTimeStamp 修改为自建时间戳地址（自建时间戳接受地址中设定的时间，用以伪造签名）
 3. [mssign32!SignerTimeStamp](https://docs.microsoft.com/en-us/windows/win32/seccrypto/signertimestamp) 同上
-4. [kernel32.dll!GetLocalTime](https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getlocaltime) 返回值根据配置文件修改，对于程序功能无影响。
+4. [mssign32!SignerTimeStampEx2](https://docs.microsoft.com/zh-cn/windows/win32/seccrypto/signertimestampex2) 同上
+5. [mssign32!SignerTimeStampEx3](https://docs.microsoft.com/zh-cn/windows/win32/seccrypto/signertimestampex3) 同上 （此函数在 Windows 7 上不存在）
+6. [kernel32.dll!GetLocalTime](https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getlocaltime) 返回值根据配置文件修改，对于程序功能无影响。
 
 ## 用法
 这个`dll`有两种设置方法，一种是`ini`文件，另一种是命令行参数
